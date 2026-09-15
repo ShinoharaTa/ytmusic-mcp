@@ -83,6 +83,21 @@ claude mcp add ytmusic \
 | `get_library_albums` | ライブラリに保存したアルバム |
 | `whoami` | 認証されているアカウント名 |
 
+探索（プレイリストを育てる用）:
+
+| ツール | 内容 |
+|---|---|
+| `get_song_radio` | 1曲（またはプレイリスト）を種にラジオを展開し、似た曲を集める |
+| `get_related_songs` | 関連曲・他の演奏・類似アーティスト・おすすめプレイリスト |
+| `get_artist_overview` | アーティストの人気曲・アルバム・シングル・関連アーティスト |
+| `get_history` | 最近聴いた曲 |
+| `get_taste_profile` | アカウントの好みの傾向（アーティスト一覧） |
+
+典型的な流れは
+`search` → `get_song_radio` → `get_related_songs` → `add_songs_to_playlist`。
+`search` は「ユーザーが名前を言った曲」しか見つけられないので、広げるときは
+ラジオと関連曲を使います。
+
 書き込み:
 
 | ツール | 内容 |
@@ -100,7 +115,9 @@ claude mcp add ytmusic \
   `YTMUSIC_MCP_ALLOW_DELETE=1`。有効時も、現在のタイトルと完全一致する
   `confirm_title` を渡さないと削除しません。
 - 1 回の呼び出しで追加・削除できるのは既定 100 曲まで（`YTMUSIC_MCP_MAX_BULK` で変更）。
-- レスポンスはサムネイル等を落として整形済み。Claude のコンテキストを浪費しません。
+- レスポンスはサムネイル等を落として整形済み。Claude のコンテキストを浪費しません
+  （実測: `get_song_radio` 約0.8KB、`get_related_songs` 約3KB、`get_artist_overview` 約5KB）。
+  アーティスト経歴など長文は 500 字で切っています。
 
 ## 環境変数
 
