@@ -1,0 +1,16 @@
+# --- credentials: never commit ---
+browser.json
+oauth.json
+headers_raw.txt
+.env
+*.secret
+
+# --- python ---
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- editors / os ---
+.DS_Store
+*.swp
