@@ -40,7 +40,10 @@ mcp = MCPServer(
         "rate_song) change the account and should only run when the user asked for "
         "that change. Always confirm the target playlist by listing it first: "
         "playlist IDs are not guessable. Removing songs and reordering need the "
-        "setVideoId values returned by get_playlist, so call get_playlist first."
+        "setVideoId values returned by get_playlist, so call get_playlist first. "
+        "To grow a playlist with similar music, start from a song the user likes "
+        "and chain get_song_radio -> get_related_songs -> add_songs_to_playlist; "
+        "search only finds titles the user already named."
     ),
 )
 
@@ -168,6 +171,9 @@ def search(
     shaped = []
     for item in results[:limit]:
         entry = track(item)
+        # Artist hits carry their name under "artist" and have no "title".
+        if not entry["title"] and item.get("artist"):
+            entry["title"] = item["artist"]
         entry["resultType"] = item.get("resultType")
         if item.get("browseId"):
             entry["browseId"] = item["browseId"]
@@ -244,6 +250,145 @@ def whoami() -> dict[str, Any]:
     """Report which YouTube Music account the credentials belong to."""
     info = call(lambda: client().get_account_info(), "Reading account info")
     return {"accountName": info.get("accountName"), "channelHandle": info.get("channelHandle")}
+
+
+# --------------------------------------------------------------------------- discovery tools
+
+# These drive the "grow a playlist" workflow: start from one song the user likes,
+# pull YouTube Music's own recommendations, then feed the videoIds to
+# add_songs_to_playlist. All read-only.
+
+
+@mcp.tool(title="Get a song or playlist radio", annotations=READ_ONLY)
+def get_song_radio(
+    video_id: str | None = None,
+    playlist_id: str | None = None,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Expand one song (or an existing playlist) into YouTube Music's radio queue of similar tracks. Returns relatedBrowseId for use with get_related_songs."""
+    if bool(video_id) == bool(playlist_id):
+        raise ToolError("Give exactly one of video_id or playlist_id.")
+    pid = normalize_playlist_id(playlist_id) if playlist_id else None
+    data = call(
+        lambda: client().get_watch_playlist(
+            videoId=video_id.strip() if video_id else None,
+            playlistId=pid,
+            radio=True,
+            limit=limit,
+        ),
+        "Building radio",
+    )
+    tracks = [track(t) for t in (data.get("tracks") or [])][:limit]
+    return {
+        "seed": {"videoId": video_id, "playlistId": pid},
+        "returned": len(tracks),
+        "relatedBrowseId": data.get("related"),
+        "tracks": tracks,
+    }
+
+
+@mcp.tool(title="Get songs related to a song", annotations=READ_ONLY)
+def get_related_songs(browse_id: str, max_per_section: int = 10) -> dict[str, Any]:
+    """Get YouTube Music's related content for a song: similar songs, other performances, similar artists, recommended playlists. browse_id comes from get_song_radio's relatedBrowseId."""
+    if not browse_id.strip():
+        raise ToolError("browse_id must not be blank.")
+    sections = call(lambda: client().get_song_related(browse_id.strip()), "Reading related songs")
+
+    shaped: list[dict[str, Any]] = []
+    about: str | None = None
+    for section in sections:
+        contents = section.get("contents")
+        # The "About the artist" section returns a long biography string rather
+        # than a list; keep a short excerpt instead of flooding the response.
+        if isinstance(contents, str):
+            about = contents[:500]
+            continue
+        items = []
+        for entry in (contents or [])[:max_per_section]:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("videoId"):
+                items.append(track(entry))
+            elif entry.get("playlistId") and not entry.get("videoId"):
+                items.append(
+                    {
+                        "playlistId": entry["playlistId"],
+                        "title": entry.get("title"),
+                        "description": entry.get("description"),
+                    }
+                )
+            elif entry.get("browseId"):
+                items.append(
+                    {
+                        "browseId": entry["browseId"],
+                        "title": entry.get("title"),
+                        "type": entry.get("type"),
+                        "year": entry.get("year"),
+                        "subscribers": entry.get("subscribers"),
+                    }
+                )
+        if items:
+            shaped.append({"title": section.get("title"), "items": items})
+
+    return {"browseId": browse_id.strip(), "sections": shaped, "aboutTheArtist": about}
+
+
+@mcp.tool(title="Get an artist's top songs and albums", annotations=READ_ONLY)
+def get_artist_overview(channel_id: str) -> dict[str, Any]:
+    """Get an artist's popular songs, albums, singles and related artists. channel_id is a browseId from search(filter='artists')."""
+    if not channel_id.strip():
+        raise ToolError("channel_id must not be blank.")
+    data = call(lambda: client().get_artist(channel_id.strip()), f"Reading artist {channel_id}")
+
+    def section(key: str) -> list[dict[str, Any]]:
+        value = data.get(key)
+        return (value.get("results") or []) if isinstance(value, dict) else []
+
+    def release(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "browseId": item.get("browseId"),
+            "playlistId": item.get("audioPlaylistId"),
+            "title": item.get("title"),
+            "year": item.get("year"),
+            "type": item.get("type"),
+        }
+
+    description = data.get("description")
+    return {
+        "channelId": data.get("channelId", channel_id.strip()),
+        "name": data.get("name"),
+        "description": description[:500] if isinstance(description, str) else None,
+        "subscribers": data.get("subscribers"),
+        "monthlyListeners": data.get("monthlyListeners"),
+        "radioId": data.get("radioId"),
+        "topSongs": [track(t) for t in section("songs")],
+        "albums": [release(a) for a in section("albums")],
+        "singles": [release(s) for s in section("singles")],
+        "relatedArtists": [
+            {"browseId": r.get("browseId"), "name": r.get("title"), "subscribers": r.get("subscribers")}
+            for r in section("related")
+        ],
+    }
+
+
+@mcp.tool(title="Get my listening history", annotations=READ_ONLY)
+def get_history(limit: int = 50) -> dict[str, Any]:
+    """Read the account's recently played songs, newest first."""
+    results = call(lambda: client().get_history(), "Reading listening history")
+    tracks = []
+    for item in results[:limit]:
+        entry = track(item)
+        if item.get("played"):
+            entry["played"] = item["played"]
+        tracks.append(entry)
+    return {"returned": len(tracks), "tracks": tracks}
+
+
+@mcp.tool(title="Get my taste profile", annotations=READ_ONLY)
+def get_taste_profile() -> dict[str, Any]:
+    """Read the artists YouTube Music associates with this account's taste."""
+    profile = call(lambda: client().get_tasteprofile(), "Reading taste profile")
+    return {"count": len(profile), "artists": sorted(profile.keys())}
 
 
 # --------------------------------------------------------------------------- write tools
